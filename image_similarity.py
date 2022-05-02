@@ -92,16 +92,6 @@ def list_of_files_in_directory(path_directory):
             res.append(os.path.join(path, name))
     return res
 
-def write_json(object_to_write, path):
-    """Read write json"""
-    
-    ext = os.path.splitext(path)[-1].lower()
-    if ext != ".json":
-        raise TypeError("The file is not a .json file!")
-
-    with open(path, 'w') as outfile:
-        json.dump(object_to_write, outfile, indent=4, sort_keys=True)
-
 args            = parse_arguments()
 start_time      = time.time()
 IMAGE_SHAPE     = None
