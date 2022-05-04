@@ -18,6 +18,7 @@ from scipy.spatial import distance
 
 import time
 import random
+import pickle
 import logging
 from functools import wraps
 from termcolor import colored
@@ -83,8 +84,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='')
     parser.add_argument('--input_dir', type=str, default="./imgs", help='Path where images to sort are stored.', required=True)
     parser.add_argument('--use_tfhub_model', type=str2bool, nargs='?', const=True, default=False, help="Download model from TFHUB.")
-    parser.add_argument('--fast_mode', type=str2bool, nargs='?', const=True, default=False, help="Use fast mode.")
-                                                                                                                                                     
+    parser.add_argument('--load_data', type=str2bool, nargs='?', const=True, default=False, help="Load image features.")
     return parser.parse_args()
 
 def list_directories_only(rootdir):
@@ -103,21 +103,28 @@ def list_of_files_in_directory(path_directory):
             res.append(os.path.join(path, name))
     return res
 
-args            = parse_arguments()
-start_time      = time.time()
-IMAGE_SHAPE     = None
-layer           = None
-USE_TFHUB_MODEL = args.use_tfhub_model
-FAST_MODE       = args.fast_mode
+start_time             = time.time()
+args                   = parse_arguments()
+folderToSort           = args.input_dir
+load_data              = args.load_data
+use_tfhub_model        = args.use_tfhub_model
+image_shape            = None
+layer                  = None
+sortedFolder           = "imageSorted"
+pat_to_features_binary = "./image_features.bin"
+data                   = {}
 
-if USE_TFHUB_MODEL:
-    print(colored("Downloading model...", 'red'))
-    IMAGE_SHAPE = (512, 512)
+shutil.rmtree(sortedFolder, ignore_errors=True)
+os.makedirs(sortedFolder, exist_ok=True)
+
+if use_tfhub_model:
+    print(colored("Downloading model from Tensorflow hub...", 'red'))
+    image_shape = (512, 512)
     model_url   = "https://tfhub.dev/google/imagenet/efficientnet_v2_imagenet21k_ft1k_xl/feature_vector/2"
     layer       = hub.KerasLayer(model_url)
 else:
     print(colored("Loading model from disk...", 'red'))
-    IMAGE_SHAPE  = (224, 224)
+    image_shape  = (224, 224)
     loaded_model = tf.keras.models.load_model('saved_model/my_model_keras')
     # Check its architecture
     loaded_model.summary()
@@ -127,7 +134,7 @@ print(colored("...Done!", 'red'))
 
 @profile
 def extract(file):
-    file = Image.open(file).convert('L').resize(IMAGE_SHAPE)
+    file = Image.open(file).convert('L').resize(image_shape)
     file = np.stack((file,)*3, axis=-1)
     file = np.array(file)/255.0
 
@@ -137,58 +144,60 @@ def extract(file):
     return flattended_features
 
 @profile
-def computeSimilarity(img1Name, img2Name):
+def computeSimilarity(img1Features, img2Features):
     metric = 'cosine'
-    img1   = extract(img1Name)
-    img2   = extract(img2Name)
-    return distance.cdist([img1], [img2], metric)[0]
+    return distance.cdist([img1Features], [img2Features], metric)[0]
 
-# Sort the folder by similiar images
-folderToSort = args.input_dir
-sortedFolder = "imageSorted"
+if load_data:
+    print(colored("Loading image features from disk...", 'red'))
+    file = open(pat_to_features_binary, 'rb')
+    data = pickle.load(file)
+    file.close()
+else:
+    print(colored("Extracting image features...", 'red'))
+    listOfImages = list_of_files_in_directory(folderToSort)
+    listOfImages.sort()
+    with alive_bar(len(listOfImages), force_tty=True) as bar:
+        for image in listOfImages:
+            image_features = extract(image)
+            data[image]    = image_features
+            bar()
+    p = "./image_features.bin"
+    with open(p,'wb') as file:
+        pickle.dump(data, file)
 
-shutil.rmtree(sortedFolder, ignore_errors=True)
-os.makedirs(sortedFolder, exist_ok=True)
+data_with_basename_as_key = {}
+images                    = list()
+for d in data:
+    images.append([d, data[d]])
+    data_with_basename_as_key[os.path.basename(d)] = data[d]
 
-images       = list_of_files_in_directory(folderToSort)
-images.sort()
-imageCount   = 1
-
-with alive_bar(len(images), force_tty=True) as bar:
-    for image in images:
-        if imageCount == 1:
+print(colored("Comparing image features and matching them to one another...", 'red'))
+with alive_bar(len(data), force_tty=True) as bar:
+    imageCount = 1
+    for img in images:
+        image = img[0]
+        basenameImage = os.path.basename(image)
+        if imageCount == 1: # For the first image we just copy it in its folder
             subfolder = sortedFolder + "/" + str(imageCount)
             shutil.rmtree(subfolder, ignore_errors=True)
             os.makedirs(subfolder, exist_ok=True)
             source      = image
-            destination = subfolder + "/" + os.path.basename(image)
+            destination = subfolder + "/" + basenameImage
             shutil.copy(image, destination)
             imageCount  = imageCount + 1
         else:
-            if FAST_MODE:
-                subDirectories = list_directories_only(sortedFolder)
-                foundSimilar   = False
-                for subDir  in subDirectories:
-                    subImages = list_of_files_in_directory(subDir)
-                    if len(subImages) > 0:
-                        randomSubImage = random.choice(subImages)
-                        similarity     = computeSimilarity(randomSubImage, image)
-                        if similarity < 0.25:
-                            destination2 = subDir + "/" + os.path.basename(image)
-                            shutil.copy(image, destination2)
-                            foundSimilar = True
-                            break
-            else:
-                subImages    = list_of_files_in_directory(sortedFolder)
-                foundSimilar = False
-                for subImage in subImages:
-                    similarity = computeSimilarity(subImage, image)
-                    if similarity < 0.25:
-                        subDir       = os.path.dirname(subImage)
-                        destination2 = subDir + "/" + os.path.basename(image)
-                        shutil.copy(image, destination2)
-                        foundSimilar = True
-                        break      
+            subImages    = list_of_files_in_directory(sortedFolder)
+            foundSimilar = False
+            for subImage in subImages:
+                basenameImage2 = os.path.basename(subImage)
+                similarity     = computeSimilarity(data_with_basename_as_key[basenameImage], data_with_basename_as_key[basenameImage2])
+                if similarity < 0.25:
+                    subDir       = os.path.dirname(subImage)
+                    destination2 = subDir + "/" + basenameImage
+                    shutil.copy(image, destination2)
+                    foundSimilar = True
+                    break
 
             if foundSimilar == False:
                 subfolder = sortedFolder + "/" + str(imageCount)
@@ -201,5 +210,5 @@ with alive_bar(len(images), force_tty=True) as bar:
         bar()
 
 print_prof_data()
-elapsed_time = time.time() - start_time    
+elapsed_time = time.time() - start_time
 logger.info(colored("Elapsed time: {}".format(time.strftime("%H:%M:%S", time.gmtime(elapsed_time))), 'green'))
