@@ -35,4 +35,4 @@ Run the program
 ```bash
   docker run --rm -it -u $(id -u) -w /tmp -v ${PWD}:/tmp <container_name>:<container_tag> python3 image_similarity.py --input_dir ./imgs --use_tfhub_model false --load_data false
 ```
-Caution: use the load_data paramter once you have already generated the image features and they are saved on disk.
+Caution: use the load_data parameter once you have already generated the image features and they are saved on disk.
